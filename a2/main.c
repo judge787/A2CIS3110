@@ -4,6 +4,7 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <limits.h>
+#include <ctype.h> 
 
 
 #define DICT_SIZE 150000
@@ -49,6 +50,14 @@ unsigned long hashWord(const char* word) {
     return hash % DICT_SIZE;
 }
 
+void toLowerCase(char *str) {
+    if (str) {
+        for (int i = 0; str[i]; i++) {
+            str[i] = tolower((unsigned char)str[i]);
+        }
+    }
+}
+
 void loadDictionary(const char* dictFile) {
     FILE* file = fopen(dictFile, "r");
     if (!file) {
@@ -57,6 +66,7 @@ void loadDictionary(const char* dictFile) {
     }
     char word[MAX_LENGTH];
     while (fscanf(file, "%255s", word) != EOF) {
+        toLowerCase(word);
         unsigned long index = hashWord(word);
         DictItem* newItem = malloc(sizeof(DictItem));
         strcpy(newItem->word, word);
@@ -66,6 +76,8 @@ void loadDictionary(const char* dictFile) {
     fclose(file);
 }
 
+
+
 int isWordInDictionary(const char* word) {
     unsigned long index = hashWord(word);
     for (DictItem* item = dictHashTable[index]; item != NULL; item = item->next) {
@@ -74,6 +86,8 @@ int isWordInDictionary(const char* word) {
     }
     return 0;
 }
+
+
 
 void updateSummary(const char* misspelledWord) {
     pthread_mutex_lock(&summaryMutex);
@@ -122,6 +136,20 @@ void updateSummary(const char* misspelledWord) {
 }
 
 
+char* removePunctuationAndToLower(const char* word) {
+    size_t len = strlen(word);
+    char* sanitizedWord = (char*)malloc((len + 1) * sizeof(char));
+    int index = 0;
+    for (size_t i = 0; i < len; i++) {
+        // Copy only alphanumeric characters and apostrophes
+        if (isalnum((unsigned char)word[i]) || word[i] == '\'') {
+            sanitizedWord[index++] = tolower((unsigned char)word[i]);
+        }
+    }
+    sanitizedWord[index] = '\0'; // Null-terminate the sanitized string
+    return sanitizedWord;
+}
+
 
 void saveResultsToFile(const char* filename) {
     FILE* file = fopen(filename, "w");
@@ -145,46 +173,62 @@ void printSummary() {
     }
 }
 
+char* removePunctuation(const char* word) {
+    size_t len = strlen(word);
+    char* sanitizedWord = malloc(len + 1); // +1 for the null terminator
+    int index = 0;
+
+    for (size_t i = 0; i < len; i++) {
+        if (!ispunct(word[i]) || word[i] == '-') {
+            sanitizedWord[index++] = word[i];
+        }
+    }
+    sanitizedWord[index] = '\0'; // Null-terminate the sanitized string
+    return sanitizedWord;
+}
+
 void* spellCheckTask(void* arg) {
     TaskData* data = (TaskData*)arg;
 
-    // Open the text file for reading
+    // Lock the summary mutex and increment the number of files processed
+    pthread_mutex_lock(&summaryMutex);
+    summary.totalFilesProcessed++;
+    pthread_mutex_unlock(&summaryMutex);
+
+    // Open the text file for spell checking
     FILE* textFile = fopen(data->textFile, "r");
     if (!textFile) {
         perror("Failed to open text file");
         pthread_exit(NULL);
     }
 
-    // Increment the number of files processed
-    pthread_mutex_lock(&summaryMutex);
-    summary.totalFilesProcessed++;
-    pthread_mutex_unlock(&summaryMutex);
-
-    // Initialize the word buffer
     char word[MAX_LENGTH];
-    while (fscanf(textFile, "%255s", word) != EOF) {
-        if (!isWordInDictionary(word)) {
-            // If the word is not in the dictionary, update the summary
-            updateSummary(word);
+    // Read words from the text file one by one
+    while (fscanf(textFile, "%255s", word) == 1) {
+        toLowerCase(word);
+        char* sanitizedWord = removePunctuation(word); // Remove punctuation from the word
+        if (!isWordInDictionary(sanitizedWord)) { // Check if the word is in the dictionary
+            updateSummary(sanitizedWord); // Update the summary with the misspelled word
         }
+        free(sanitizedWord); // Free the memory allocated for the sanitized word
     }
 
-    // Close the file after reading all words
-    fclose(textFile);
+    fclose(textFile); // Close the text file
 
-    // Lock the mutex to decrement activeThreads
+    // Lock the summary mutex to decrement the active thread count
     pthread_mutex_lock(&summaryMutex);
     activeThreads--;
-    // If no more threads are active, signal the condition variable
+    // If there are no active threads left, signal the condition variable
     if (activeThreads == 0) {
         pthread_cond_signal(&allThreadsDone);
     }
     pthread_mutex_unlock(&summaryMutex);
 
-    // Clean up and exit the thread
-    free(data);
-    pthread_exit(NULL);
+    free(data); // Free the task data allocated memory
+    pthread_exit(NULL); // Exit the thread
 }
+
+
 
 void startSpellCheck(const char* dictFile) {
     TaskData* taskData = malloc(sizeof(TaskData));
